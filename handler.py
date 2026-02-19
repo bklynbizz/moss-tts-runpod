@@ -31,14 +31,23 @@ def load_model():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
 
+    # Required: disable broken cuDNN SDPA backend
+    if device == "cuda":
+        torch.backends.cuda.enable_cudnn_sdp(False)
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_math_sdp(True)
+
     pretrained = os.environ.get("MODEL_NAME", "OpenMOSS-Team/MOSS-TTS")
 
+    print(f"Loading processor from {pretrained}...")
     processor = AutoProcessor.from_pretrained(
         pretrained,
         trust_remote_code=True,
     )
     processor.audio_tokenizer = processor.audio_tokenizer.to(device)
 
+    print(f"Loading model from {pretrained}...")
     model = AutoModel.from_pretrained(
         pretrained,
         trust_remote_code=True,
@@ -69,18 +78,18 @@ def generate_speech(text, voice_ref_audio=None, language="en", temperature=1.7, 
 
     # Build the conversation/prompt
     if voice_ref_audio:
-        # Voice cloning mode: decode reference audio
+        # Voice cloning mode: decode reference audio to temp file
         ref_audio_bytes = base64.b64decode(voice_ref_audio)
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             f.write(ref_audio_bytes)
             ref_path = f.name
 
         try:
+            # Official API: reference=[path] for voice cloning
             conversations = [
                 [processor.build_user_message(
                     text=text,
-                    audio_path=ref_path,
-                    mode="voice_clone"
+                    reference=[ref_path]
                 )]
             ]
         finally:
@@ -108,14 +117,14 @@ def generate_speech(text, voice_ref_audio=None, language="en", temperature=1.7, 
         )
 
     # Decode audio
-    decoded = processor.decode(outputs)[0]
-    audio = decoded.audio_codes_list[0]
+    decoded = processor.decode(outputs)
+    message = decoded[0]
+    audio = message.audio_codes_list[0]
     sample_rate = processor.model_config.sampling_rate
 
     # Save to temp file and encode as base64
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         torchaudio.save(f.name, audio.unsqueeze(0).cpu(), sample_rate)
-        f.seek(0)
         with open(f.name, "rb") as audio_file:
             audio_b64 = base64.b64encode(audio_file.read()).decode("utf-8")
         os.unlink(f.name)
@@ -162,7 +171,14 @@ def handler(job):
         return {"error": str(e), "traceback": traceback.format_exc()}
 
 
-# Pre-load model on container start
-load_model()
+# Pre-load model on container start for faster first request
+print("Starting MOSS TTS handler...")
+try:
+    load_model()
+    print("Model pre-loaded successfully!")
+except Exception as e:
+    print(f"Warning: Model pre-load failed ({e}), will retry on first request")
+    model = None
+    processor = None
 
 runpod.serverless.start({"handler": handler})
