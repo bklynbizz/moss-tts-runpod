@@ -8,14 +8,57 @@ import torch
 import torchaudio
 import base64
 import os
+import shutil
 import tempfile
 import traceback
+
+# --- Storage setup ---
+# RunPod network volume mounts at /runpod-volume
+# We MUST point all caches AND temp dirs there to avoid filling root disk
+VOLUME_PATH = "/runpod-volume"
+HF_CACHE = os.path.join(VOLUME_PATH, "huggingface")
+TEMP_DIR = os.path.join(VOLUME_PATH, "tmp")
+
+# Set env vars BEFORE any imports that use them
+os.environ["HF_HOME"] = HF_CACHE
+os.environ["TRANSFORMERS_CACHE"] = os.path.join(HF_CACHE, "hub")
+os.environ["HF_HUB_CACHE"] = os.path.join(HF_CACHE, "hub")
+os.environ["TMPDIR"] = TEMP_DIR
+os.environ["TEMP"] = TEMP_DIR
+os.environ["TMP"] = TEMP_DIR
+
+# Create dirs
+for d in [HF_CACHE, TEMP_DIR, os.path.join(HF_CACHE, "hub")]:
+    os.makedirs(d, exist_ok=True)
+
+# Override tempfile default
+tempfile.tempdir = TEMP_DIR
 
 # Global model references (loaded once on cold start)
 model = None
 processor = None
 device = None
 dtype = None
+
+
+def get_disk_info():
+    """Return disk usage for debugging."""
+    info = {}
+    for path in ["/", VOLUME_PATH, "/tmp"]:
+        try:
+            usage = shutil.disk_usage(path)
+            info[path] = {
+                "total_gb": round(usage.total / (1024**3), 2),
+                "used_gb": round(usage.used / (1024**3), 2),
+                "free_gb": round(usage.free / (1024**3), 2),
+            }
+        except Exception as e:
+            info[path] = {"error": str(e)}
+    info["hf_home"] = os.environ.get("HF_HOME", "not set")
+    info["tmpdir"] = os.environ.get("TMPDIR", "not set")
+    info["volume_exists"] = os.path.isdir(VOLUME_PATH)
+    info["volume_writable"] = os.access(VOLUME_PATH, os.W_OK)
+    return info
 
 
 def load_model():
@@ -26,6 +69,8 @@ def load_model():
         return  # Already loaded
 
     print("Loading MOSS TTS model...")
+    print(f"Disk info: {get_disk_info()}")
+
     from transformers import AutoModel, AutoProcessor
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -56,6 +101,7 @@ def load_model():
     model.eval()
 
     print(f"MOSS TTS loaded on {device} ({dtype})")
+    print(f"Disk info after load: {get_disk_info()}")
 
 
 def generate_speech(text, voice_ref_audio=None, language="en", temperature=1.7, top_p=0.8, top_k=25, max_tokens=4096):
@@ -143,6 +189,10 @@ def handler(job):
     try:
         job_input = job.get("input", {})
 
+        # Diagnostic mode
+        if job_input.get("disk_info"):
+            return get_disk_info()
+
         text = job_input.get("text")
         if not text:
             return {"error": "Missing required parameter: text"}
@@ -173,6 +223,7 @@ def handler(job):
 
 # Pre-load model on container start for faster first request
 print("Starting MOSS TTS handler...")
+print(f"Initial disk info: {get_disk_info()}")
 try:
     load_model()
     print("Model pre-loaded successfully!")
