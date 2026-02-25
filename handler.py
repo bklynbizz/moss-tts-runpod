@@ -39,6 +39,7 @@ if not hasattr(torch.nn.utils.rnn.pad_sequence, '_has_padding_side'):
 VOLUME_PATH = "/runpod-volume"
 HF_CACHE = os.path.join(VOLUME_PATH, "huggingface")
 TEMP_DIR = os.path.join(VOLUME_PATH, "tmp")
+VOICES_DIR = os.path.join(VOLUME_PATH, "voices")
 
 # Set env vars BEFORE any imports that use them
 os.environ["HF_HOME"] = HF_CACHE
@@ -49,7 +50,7 @@ os.environ["TEMP"] = TEMP_DIR
 os.environ["TMP"] = TEMP_DIR
 
 # Create dirs
-for d in [HF_CACHE, TEMP_DIR, os.path.join(HF_CACHE, "hub")]:
+for d in [HF_CACHE, TEMP_DIR, os.path.join(HF_CACHE, "hub"), VOICES_DIR]:
     os.makedirs(d, exist_ok=True)
 
 # Override tempfile default
@@ -127,13 +128,47 @@ def load_model():
     print(f"Disk info after load: {get_disk_info()}")
 
 
-def generate_speech(text, voice_ref_audio=None, language="en", temperature=1.7, top_p=0.8, top_k=25, max_tokens=4096):
+def save_voice(voice_id, audio_b64):
+    """Save a voice reference to the network volume for reuse."""
+    audio_bytes = base64.b64decode(audio_b64)
+    voice_path = os.path.join(VOICES_DIR, f"{voice_id}.wav")
+    with open(voice_path, "wb") as f:
+        f.write(audio_bytes)
+    return voice_path
+
+
+def get_voice_path(voice_id):
+    """Get path to a saved voice reference, or None if not found."""
+    voice_path = os.path.join(VOICES_DIR, f"{voice_id}.wav")
+    return voice_path if os.path.exists(voice_path) else None
+
+
+def list_voices():
+    """List all saved voice IDs."""
+    voices = []
+    for f in os.listdir(VOICES_DIR):
+        if f.endswith(".wav"):
+            voices.append(f[:-4])  # strip .wav
+    return voices
+
+
+def delete_voice(voice_id):
+    """Delete a saved voice reference."""
+    voice_path = os.path.join(VOICES_DIR, f"{voice_id}.wav")
+    if os.path.exists(voice_path):
+        os.remove(voice_path)
+        return True
+    return False
+
+
+def generate_speech(text, voice_ref_audio=None, voice_id=None, language="en", temperature=1.7, top_p=0.8, top_k=25, max_tokens=4096):
     """
     Generate speech from text, optionally cloning a reference voice.
 
     Args:
         text: Text to synthesize
         voice_ref_audio: Base64-encoded audio for voice cloning (optional)
+        voice_id: Name of a previously saved voice to use (optional)
         language: Language code (en, zh, es, fr, de, ja, ko, etc.)
         temperature: Audio sampling temperature (default 1.7 for Delay-8B)
         top_p: Top-p sampling (default 0.8)
@@ -145,29 +180,39 @@ def generate_speech(text, voice_ref_audio=None, language="en", temperature=1.7, 
     """
     load_model()
 
-    # Build the conversation/prompt
+    ref_path = None
+    cleanup_ref = False
+
+    # Resolve voice reference
     if voice_ref_audio:
-        # Voice cloning mode: decode reference audio to temp file
+        # New audio provided — decode to temp file
         ref_audio_bytes = base64.b64decode(voice_ref_audio)
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             f.write(ref_audio_bytes)
             ref_path = f.name
+            cleanup_ref = True
+    elif voice_id:
+        # Use a previously saved voice
+        ref_path = get_voice_path(voice_id)
+        if not ref_path:
+            return {"error": f"Voice '{voice_id}' not found. Available: {list_voices()}"}
 
-        try:
-            # Official API: reference=[path] for voice cloning
+    # Build the conversation/prompt
+    try:
+        if ref_path:
             conversations = [
                 [processor.build_user_message(
                     text=text,
                     reference=[ref_path]
                 )]
             ]
-        finally:
+        else:
+            conversations = [
+                [processor.build_user_message(text=text)]
+            ]
+    finally:
+        if cleanup_ref and ref_path:
             os.unlink(ref_path)
-    else:
-        # Standard generation mode
-        conversations = [
-            [processor.build_user_message(text=text)]
-        ]
 
     # Tokenize
     batch = processor(conversations, mode="generation")
@@ -203,7 +248,8 @@ def generate_speech(text, voice_ref_audio=None, language="en", temperature=1.7, 
         "sample_rate": sample_rate,
         "format": "wav",
         "text": text,
-        "voice_cloned": voice_ref_audio is not None,
+        "voice_cloned": ref_path is not None,
+        "voice_id": voice_id if voice_id else None,
     }
 
 
@@ -216,26 +262,57 @@ def handler(job):
         if job_input.get("disk_info"):
             return get_disk_info()
 
+        # Voice management actions
+        action = job_input.get("action")
+        if action == "save_voice":
+            vid = job_input.get("voice_id")
+            audio = job_input.get("voice_ref_audio")
+            if not vid or not audio:
+                return {"error": "save_voice requires voice_id and voice_ref_audio"}
+            path = save_voice(vid, audio)
+            return {"saved": vid, "path": path, "all_voices": list_voices()}
+
+        if action == "list_voices":
+            return {"voices": list_voices()}
+
+        if action == "delete_voice":
+            vid = job_input.get("voice_id")
+            if not vid:
+                return {"error": "delete_voice requires voice_id"}
+            deleted = delete_voice(vid)
+            return {"deleted": vid, "success": deleted, "all_voices": list_voices()}
+
+        # TTS generation
         text = job_input.get("text")
         if not text:
             return {"error": "Missing required parameter: text"}
 
         voice_ref_audio = job_input.get("voice_ref_audio")  # base64 audio
+        voice_id = job_input.get("voice_id")  # saved voice name
+        save_as = job_input.get("save_voice_as")  # save this ref for future use
         language = job_input.get("language", "en")
         temperature = job_input.get("temperature", 1.7)
         top_p = job_input.get("top_p", 0.8)
         top_k = job_input.get("top_k", 25)
         max_tokens = job_input.get("max_tokens", 4096)
 
+        # If new audio provided and save_voice_as set, save it for future use
+        if voice_ref_audio and save_as:
+            save_voice(save_as, voice_ref_audio)
+
         result = generate_speech(
             text=text,
             voice_ref_audio=voice_ref_audio,
+            voice_id=voice_id,
             language=language,
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
             max_tokens=max_tokens,
         )
+
+        if voice_ref_audio and save_as:
+            result["voice_saved_as"] = save_as
 
         return result
 
