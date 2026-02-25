@@ -198,26 +198,27 @@ def generate_speech(text, voice_ref_audio=None, voice_id=None, language="en", te
             return {"error": f"Voice '{voice_id}' not found. Available: {list_voices()}"}
 
     # Build the conversation/prompt
-    try:
-        if ref_path:
-            conversations = [
-                [processor.build_user_message(
-                    text=text,
-                    reference=[ref_path]
-                )]
-            ]
-        else:
-            conversations = [
-                [processor.build_user_message(text=text)]
-            ]
-    finally:
-        if cleanup_ref and ref_path:
-            os.unlink(ref_path)
+    if ref_path:
+        conversations = [
+            [processor.build_user_message(
+                text=text,
+                reference=[ref_path]
+            )]
+        ]
+    else:
+        conversations = [
+            [processor.build_user_message(text=text)]
+        ]
 
-    # Tokenize
+    # Tokenize — must happen BEFORE deleting temp ref file,
+    # because processor() reads the audio from the file path
     batch = processor(conversations, mode="generation")
     input_ids = batch["input_ids"].to(device)
     attention_mask = batch["attention_mask"].to(device)
+
+    # Now safe to delete the temp reference file
+    if cleanup_ref and ref_path:
+        os.unlink(ref_path)
 
     # Generate
     with torch.no_grad():
