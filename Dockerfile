@@ -8,7 +8,15 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies (pad_sequence compat is handled in handler.py)
+# Upgrade PyTorch + torchvision first (base has 2.4.0 which lacks pad_sequence padding_side
+# and its torchvision conflicts with newer transformers). Handler has monkey-patch fallback.
+RUN pip install --no-cache-dir \
+    "torch>=2.5.0" \
+    "torchaudio>=2.5.0" \
+    "torchvision>=0.20.0" \
+    --index-url https://download.pytorch.org/whl/cu124
+
+# Install remaining Python dependencies
 RUN pip install --no-cache-dir \
     runpod \
     "transformers>=4.45.0" \
