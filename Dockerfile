@@ -8,13 +8,8 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Upgrade PyTorch to 2.5+ (pad_sequence padding_side requires it)
-# Then install other dependencies
+# Install Python dependencies (pad_sequence compat is handled in handler.py)
 RUN pip install --no-cache-dir \
-    "torch>=2.5.0" \
-    "torchaudio>=2.5.0" \
-    --index-url https://download.pytorch.org/whl/cu124 && \
-    pip install --no-cache-dir \
     runpod \
     "transformers>=4.45.0" \
     accelerate \
