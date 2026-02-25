@@ -1,4 +1,4 @@
-FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+FROM runpod/pytorch:2.8.0-py3.12-cuda12.8.1-devel-ubuntu22.04
 
 WORKDIR /app
 
@@ -8,11 +8,11 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
-RUN pip install --no-cache-dir \
+# Install Python dependencies — MOSS TTS requires transformers 5.0.0+
+RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cu128 \
     runpod \
-    "transformers>=4.45.0" \
-    "torchaudio>=2.4.0" \
+    "transformers>=5.0.0" \
+    "torchaudio>=2.8.0" \
     accelerate \
     soundfile \
     librosa \
