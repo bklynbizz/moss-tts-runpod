@@ -1,4 +1,4 @@
-FROM runpod/pytorch:2.8.0-py3.12-cuda12.8.1-devel-ubuntu22.04
+FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 
 WORKDIR /app
 
@@ -8,11 +8,15 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies — MOSS TTS requires transformers 5.0.0+
-RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cu128 \
+# Upgrade PyTorch to 2.5+ (pad_sequence padding_side requires it)
+# Then install other dependencies
+RUN pip install --no-cache-dir \
+    "torch>=2.5.0" \
+    "torchaudio>=2.5.0" \
+    --index-url https://download.pytorch.org/whl/cu124 && \
+    pip install --no-cache-dir \
     runpod \
-    "transformers>=5.0.0" \
-    "torchaudio>=2.8.0" \
+    "transformers>=4.45.0" \
     accelerate \
     soundfile \
     librosa \
@@ -22,7 +26,6 @@ RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/wh
 COPY handler.py /app/handler.py
 
 # ALL caches and temp dirs must point to network volume to avoid filling root disk
-# Network volume mounts at /runpod-volume
 ENV HF_HOME=/runpod-volume/huggingface
 ENV TRANSFORMERS_CACHE=/runpod-volume/huggingface/hub
 ENV HF_HUB_CACHE=/runpod-volume/huggingface/hub
