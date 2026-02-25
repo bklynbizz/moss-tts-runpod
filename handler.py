@@ -12,6 +12,27 @@ import shutil
 import tempfile
 import traceback
 
+# --- Monkey-patch pad_sequence for PyTorch < 2.5 ---
+# MOSS TTS processor calls pad_sequence(padding_side=...) which was added in PyTorch 2.5.
+# If we're on an older version, wrap the original to handle the kwarg.
+_orig_pad_sequence = torch.nn.utils.rnn.pad_sequence
+
+def _patched_pad_sequence(sequences, batch_first=False, padding_value=0.0, padding_side="right"):
+    if padding_side == "left":
+        # Reverse each sequence, pad (right), then reverse back
+        reversed_seqs = [seq.flip(0) for seq in sequences]
+        padded = _orig_pad_sequence(reversed_seqs, batch_first=batch_first, padding_value=padding_value)
+        return padded.flip(1 if batch_first else 0)
+    return _orig_pad_sequence(sequences, batch_first=batch_first, padding_value=padding_value)
+
+if not hasattr(torch.nn.utils.rnn.pad_sequence, '_has_padding_side'):
+    try:
+        # Test if native pad_sequence already supports padding_side
+        _test = torch.nn.utils.rnn.pad_sequence([torch.zeros(1)], padding_side="right")
+    except TypeError:
+        torch.nn.utils.rnn.pad_sequence = _patched_pad_sequence
+        print(f"Patched pad_sequence for PyTorch {torch.__version__} (< 2.5 compat)")
+
 # --- Storage setup ---
 # RunPod network volume mounts at /runpod-volume
 # We MUST point all caches AND temp dirs there to avoid filling root disk
@@ -58,6 +79,8 @@ def get_disk_info():
     info["tmpdir"] = os.environ.get("TMPDIR", "not set")
     info["volume_exists"] = os.path.isdir(VOLUME_PATH)
     info["volume_writable"] = os.access(VOLUME_PATH, os.W_OK)
+    info["torch_version"] = torch.__version__
+    info["cuda_available"] = torch.cuda.is_available()
     return info
 
 
